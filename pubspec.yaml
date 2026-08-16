@@ -7,12 +7,24 @@ version: 0.1.0
 homepage: https://github.com/nmfisher/assimp_dart
 repository: https://github.com/nmfisher/assimp_dart
 
+# Consumed from this repository rather than pub.dev, and thermion_dart is
+# pinned to a git commit, so this package is not publishable to pub.dev.
+publish_to: none
+
 environment:
   sdk: ">=3.10.0 <4.0.0"
 
-# No dependency on thermion_dart (or any rendering package): the import and
-# export paths link against libassimp only, so the native library built by
-# hook/build.dart contains no Filament code and the tests run headless.
+# The core import/export paths link against libassimp only: the native
+# library built by hook/build.dart contains no Filament code and the core
+# tests run headless.
+#
+# thermion_dart is a compile-time-only dependency, used exclusively by the
+# optional integration layer (lib/thermion.dart): RawMesh.toGeometry and the
+# viewer-level loadModel/loadModelFromBuffer extensions. It is pinned to the
+# thermion develop tip at the time this was written, verified to expose
+# everything the integration needs (ThermionViewer.app, viewer-level
+# createGeometry, ThermionAsset, Geometry/IndexType, FilamentApp.loadResource).
+# Bump deliberately when thermion's API moves.
 dependencies:
   ffi: ^2.1.2
   # Build-hook toolchain: downloads the prebuilt libassimp + assimp headers
@@ -24,6 +36,21 @@ dependencies:
   crypto: ^3.0.0
   logging: ^1.2.0
   path: ^1.9.0
+  thermion_dart:
+    git:
+      url: https://github.com/nmfisher/thermion.git
+      path: thermion_dart
+      ref: f89b1a6f41abf82639362c1750c1e269bdef6c4e
+
+# Applies only when THIS package is the root (dart test / dart run here):
+# thermion_dart's build hook then skips its Filament native build, because the
+# core tests are headless and never call thermion native code. A downstream
+# app that depends on assimp_dart is the root instead and controls
+# thermion_dart's user_defines itself — it gets the real native build.
+hooks:
+  user_defines:
+    thermion_dart:
+      skip_native_build: true
 
 dev_dependencies:
   test: ^1.28.0
