@@ -1,0 +1,182 @@
+import 'package:assimp_dart/src/bindings/assimp_dart_ffi.dart';
+
+/// Primitive type of a mesh. Values match filament's DriverEnums (and GL),
+/// including the hole at index 2 — see TPrimitiveType in the bindings.
+enum PrimitiveType {
+  // don't change the enums values (made to match GL)
+  POINTS, //!< points
+  LINES, //!< lines
+  UNUSED1,
+  LINE_STRIP, //!< line strip
+  TRIANGLES, //!< triangles
+  TRIANGLE_STRIP, //!< triangle strip
+}
+
+/// The single flat-mesh result type of the model-file import path (Assimp).
+///
+/// A [RawMesh] is one decomposed mesh of a model file: names plus vertex
+/// attributes and indices, with no scene hierarchy. Positions/normals are
+/// 3 floats per vertex, UVs are 2 floats per vertex (first channel only).
+///
+/// Ported from thermion_dart's model_import/src/raw_mesh.dart. The
+/// thermion-side `toGeometry` conversion (Filament upload: dummy
+/// colors/UVs, USHORT index narrowing) is intentionally NOT ported — it
+/// depends on thermion's Geometry/IndexType render types; [flipUVs] is kept
+/// so consumers can apply the same vertical flip at upload time.
+///
+/// ## Buffer ownership
+///
+/// Meshes produced by an importer ([RawMesh.fromNative]) expose their
+/// positions/normals/uvs/indices as typed-data **views** backed by native
+/// memory owned by this object — no Dart-side copy is made. The buffers are
+/// private copies that the native layer malloc'd when the mesh was read
+/// (they are not tied to the importer or the parsed scene), so they stay
+/// valid until [dispose] is called, even after the importer is destroyed.
+///
+/// - [dispose] frees the native buffers (exactly once; idempotent). After
+///   it returns, the typed-data views are dangling and must not be read.
+/// - A mesh that is never disposed keeps its native memory until the
+///   process exits; there is no finalizer (see the bindings' explicit-
+///   dispose convention).
+/// - Meshes built through the public constructor own plain Dart lists and
+///   need no disposal.
+class RawMesh {
+  /// Mesh/object name, or null when the file does not name the mesh.
+  final String? name;
+
+  /// Material name assigned to this mesh, or null.
+  final String? materialName;
+
+  /// Vertex positions (3 floats per vertex: x, y, z).
+  final Float32List positions;
+
+  /// Vertex normals (3 floats per normal). Empty when the mesh has none.
+  final Float32List? _normals;
+
+  /// First UV channel (2 floats per UV). Empty when the mesh has none.
+  final Float32List? _uvs;
+
+  /// Triangle indices (empty for non-indexed meshes).
+  final Uint32List? _indices;
+
+  /// Primitive type of the mesh. The importer returns triangle lists;
+  /// strips/fans are expanded to triangles on the native side.
+  final PrimitiveType primitiveType;
+
+  /// The native struct whose buffers back this mesh's typed-data views.
+  ///
+  /// Null for meshes built from Dart-owned lists (public constructor) and
+  /// after [dispose]. Owned exclusively by this object.
+  Pointer<TMeshData>? _nativeData;
+
+  RawMesh({
+    required this.name,
+    required this.materialName,
+    required this.positions,
+    Float32List? normals,
+    Float32List? uvs,
+    Uint32List? indices,
+    this.primitiveType = PrimitiveType.TRIANGLES,
+  }) : _normals = normals,
+       _uvs = uvs,
+       _indices = indices;
+
+  /// Adopts a filled [TMeshData] and exposes its buffers as zero-copy
+  /// typed-data views.
+  ///
+  /// Internal: called by the importers ([AssimpImporter]). The struct must
+  /// have been allocated through the bindings `allocate` shim and filled by
+  /// native code that malloc'd each buffer; ownership of both the struct and
+  /// the buffers moves into the returned [RawMesh] and is released by
+  /// [dispose]. Names are decoded to Dart strings here (before any dispose
+  /// could run).
+  static RawMesh fromNative(Pointer<TMeshData> meshData) {
+    final ref = meshData.ref;
+    final mesh = RawMesh(
+      name: _safeDartString(ref.name),
+      materialName: _safeDartString(ref.materialName),
+      positions: _float32View(ref.vertices, ref.vertexCount),
+      normals: _float32View(ref.normals, ref.normalCount),
+      uvs: _float32View(ref.uvs, ref.uvCount),
+      indices: _uint32View(ref.indices, ref.indexCount),
+      primitiveType: PrimitiveType.values[ref.primitiveType],
+    );
+    mesh._nativeData = meshData;
+    return mesh;
+  }
+
+  /// Vertex normals, empty when the mesh has none.
+  Float32List get normals => _normals ?? _emptyFloat32;
+
+  /// First UV channel, empty when the mesh has none.
+  Float32List get uvs => _uvs ?? _emptyFloat32;
+
+  /// Triangle indices, empty for non-indexed meshes.
+  Uint32List get indices => _indices ?? _emptyUint32;
+
+  /// Number of vertices (positions.length ~/ 3).
+  int get vertexCount => positions.length ~/ 3;
+
+  /// Flips UV coordinates vertically (v = 1.0 - v), u unchanged.
+  ///
+  /// Source formats use a bottom-left UV origin (most do), while GL-style
+  /// renderers expect top-left. Flipping happens here on the Dart side only,
+  /// never in native Assimp, so it is never double-applied. This is the same
+  /// routine thermion applies inside RawMesh.toGeometry at upload time.
+  static Float32List flipUVs(Float32List uvs) {
+    final result = Float32List(uvs.length);
+    for (int i = 0; i < uvs.length; i += 2) {
+      result[i] = uvs[i]; // u unchanged
+      result[i + 1] = 1.0 - uvs[i + 1]; // v flipped
+    }
+    return result;
+  }
+
+  /// Releases the native buffers backing this mesh's views.
+  ///
+  /// Idempotent; a no-op for meshes built from Dart-owned lists. After this
+  /// returns, the typed-data views ([positions], [normals], [uvs],
+  /// [indices]) point to freed memory and must not be read — so only call
+  /// it once every consumer of the buffers is done.
+  void dispose() {
+    final native = _nativeData;
+    if (native == null) return;
+    _nativeData = null;
+    MeshData_dispose(native); // frees the buffers (native malloc/free)
+    free(native); // frees the shim-allocated struct itself
+  }
+
+  /// Zero-copy view over a native float buffer, or an empty (Dart-owned)
+  /// list when the attribute is absent.
+  static Float32List _float32View(Pointer<Float> pointer, int count) {
+    if (pointer == nullptr || count <= 0) {
+      return Float32List(0);
+    }
+    return pointer.asTypedList(count);
+  }
+
+  /// Zero-copy view over a native uint32 index buffer, or an empty
+  /// (Dart-owned) list when the mesh is non-indexed.
+  static Uint32List _uint32View(Pointer<Uint32> pointer, int count) {
+    if (pointer == nullptr || count <= 0) {
+      return Uint32List(0);
+    }
+    return pointer.asTypedList(count);
+  }
+
+  /// Convert a C string pointer to a Dart string, null on null pointer or
+  /// invalid UTF-8.
+  static String? _safeDartString(Pointer<Char> ptr) {
+    if (ptr == nullptr) return null;
+    try {
+      return ptr.cast<Utf8>().toDartString();
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+// Shared empty lists so callers can omit optional attributes without
+// allocating.
+final Float32List _emptyFloat32 = Float32List(0);
+final Uint32List _emptyUint32 = Uint32List(0);
