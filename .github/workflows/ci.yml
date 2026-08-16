@@ -1,0 +1,111 @@
+name: CI
+
+# Model import/export tests for assimp_dart: builds libassimp_dart (the
+# build hook downloads the prebuilt libassimp + assimp headers from the
+# Thermion R2 artifacts) and runs the OBJ/FBX/STL/PLY import and FBX export
+# tests, including the FBX round-trip and the garbage-bytes regression test.
+#
+# These are pure parse/export tests: no Filament, no rendering surface, no
+# xvfb, no RenderThread — mirroring thermion's run-assimp-tests.yml, which
+# this workflow is adapted from.
+#
+# The Linux toolchain is deliberately clang-18 + libc++ 18 from apt.llvm.org,
+# identical to what builds the R2 artifacts. The tests link a libc++-built
+# libassimp.a and the built libassimp_dart.so resolves libc++.so.1 at
+# runtime: running against a mismatched libc++abi (an older runtime injected
+# through LD_LIBRARY_PATH) crashed inside libc++abi's exception/RTTI
+# machinery in thermion's CI (PR #195). With no LD_LIBRARY_PATH override the
+# matching runtime comes from the default system paths.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+          - name: Windows
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ~\AppData\Local\Pub\Cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'pubspec.yaml') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      - name: Cache R2 artifacts
+        # The hook's download is content-addressed by filament.version +
+        # platform + mode; cache it so CI does not re-download ~20-106 MB
+        # per run.
+        uses: actions/cache@v4
+        with:
+          path: .dart_tool/assimp_dart/lib
+          key: assimp-artifacts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('filament.version') }}
+
+      - name: Install artifact-matched clang/libc++ 18 (Linux)
+        # clang-18 + libc++ 18 from apt.llvm.org — the same toolchain that
+        # builds the R2 artifacts (see thermion's build-filament workflow).
+        # jammy's distro libc++-dev/libc++abi-dev are LLVM 14 and must NOT be
+        # installed: they would shadow the 18 runtime in the same directory.
+        # libunwind-18 provides the libunwind.so.1 that libassimp_dart.so
+        # needs at dlopen time; zlib1g-dev provides libz.so for -lz (the FBX
+        # binary tokenizer calls inflate). The hook invokes unversioned
+        # clang/clang++; apt.llvm.org only installs versioned binaries.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y zlib1g-dev
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev libunwind-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 200
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 200
+          clang --version
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Run tests
+        # Default concurrency: the two test files run as parallel isolates in
+        # one process, which concurrently dlopen and enter libassimp_dart —
+        # the configuration that used to corrupt the heap through
+        # Assimp::DefaultLogger's global state (fixed; see
+        # native/src/c_api/model_import.cpp). Running it this way keeps that
+        # fix covered on every platform.
+        run: dart test test/model_import_tests.dart test/model_export_tests.dart
+
+      - name: Concurrent import/export stress (Linux)
+        # Extra coverage on the x64 crash surface: concurrent parse/export
+        # round trips from 8 isolates. This is the stress tool that
+        # reproduced the DefaultLogger heap corruption.
+        if: runner.os == 'Linux'
+        run: dart run tool/stress_concurrent_import.dart 8 300
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.name }}
+          path: .dart_tool/assimp_dart/log/build.log
+          if-no-files-found: ignore
+          retention-days: 5

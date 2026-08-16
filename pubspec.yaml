@@ -1,0 +1,30 @@
+name: assimp_dart
+description: >-
+  Standalone Assimp-backed model-file import and export for Dart/Flutter
+  (OBJ, FBX, STL, PLY, ...). Parses model files into flat meshes (RawMesh)
+  and writes them back out, with no rendering dependency.
+version: 0.1.0
+homepage: https://github.com/nmfisher/assimp_dart
+repository: https://github.com/nmfisher/assimp_dart
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+# No dependency on thermion_dart (or any rendering package): the import and
+# export paths link against libassimp only, so the native library built by
+# hook/build.dart contains no Filament code and the tests run headless.
+dependencies:
+  ffi: ^2.1.2
+  # Build-hook toolchain: downloads the prebuilt libassimp + assimp headers
+  # from the Thermion R2 artifacts and compiles+links libassimp_dart.
+  code_assets: ^1.0.0
+  hooks: ^1.0.0
+  native_toolchain_c: ^0.17.6
+  archive: ^4.0.0
+  crypto: ^3.0.0
+  logging: ^1.2.0
+  path: ^1.9.0
+
+dev_dependencies:
+  test: ^1.28.0
+  lints: ^6.0.0
