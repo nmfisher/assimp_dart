@@ -123,8 +123,12 @@ void main(List<String> args) async {
     //    include/third_party/libassimp/include/, extracted by getAssimpDir —
     //    no vendored copy in-tree, so headers always match the linked
     //    libassimp.a.
+    // Absolute paths: the compiler runs with the hook's build output
+    // directory as cwd (native_toolchain_c's runProcess `cd`s there), so a
+    // relative "native/include" resolves to nothing — on Windows that fails
+    // cl.exe with C1083 "Cannot open include file: 'c_api/TMeshData.h'".
     final includeDirs = <String>[
-      'native/include',
+      path.join(pkgRootFilePath, 'native', 'include'),
       libResult.assimpIncludeDir.path,
     ];
 
