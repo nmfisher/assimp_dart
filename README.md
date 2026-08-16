@@ -1,12 +1,16 @@
 # assimp_dart
 
-Standalone [Assimp](https://github.com/assimp/assimp) model-file import and
-export for Dart — no rendering stack, no `thermion_dart` dependency.
+[Assimp](https://github.com/assimp/assimp) model-file import and export for
+Dart — plus an optional Thermion integration layer that loads model files
+straight into a viewer.
 
 Parses model files (OBJ, FBX, glTF/glb, STL, PLY, ...) into flat meshes
 (`RawMesh`) and writes them back out (FBX). Extracted from the
 [model_import facade in thermion_dart](https://github.com/nmfisher/thermion/tree/feat/assimp-integration/thermion_dart/lib/src/model_import)
-(thermion PR #195).
+(thermion PR #195). The core import/export API (`assimp_dart.dart`) has no
+rendering dependency and runs headless; the thermion integration
+(`thermion.dart`) is a compile-time-only `thermion_dart` dependency and owns
+the viewer-level `loadModel`/`loadModelFromBuffer` API.
 
 ## Usage
 
@@ -39,6 +43,43 @@ Ownership is explicit everywhere (thermion's convention): every native
 allocation has a matching `dispose`/`destroy` call and there is no
 `NativeFinalizer`. Mesh buffers produced by the importer are private native
 copies — they stay valid after the importer is destroyed, until `dispose`.
+
+## Thermion integration
+
+`import 'package:assimp_dart/thermion.dart';` adds Assimp model loading to
+any `ThermionViewer` (extensions), so call sites keep the shape thermion's
+in-tree implementation had:
+
+```dart
+import 'package:assimp_dart/thermion.dart';
+
+// One ThermionAsset per mesh in the file; added to the scene by default.
+final assets = await viewer.loadModel('model.obj');
+final assets2 = await viewer.loadModelFromBuffer(bytes, formatHint: 'fbx');
+```
+
+- `loadModel(uri, {addToScene = true, flipUvs = true})` loads the bytes over
+  `FilamentApp.instance.loadResource` and infers the format hint from the
+  URI's extension.
+- `loadModelFromBuffer(data, {required formatHint, addToScene = true,
+  flipUvs = true})` parses with `AssimpImporter`, converts each `RawMesh`
+  with `toGeometry` (also an extension, on `RawMesh`), and creates one
+  `ThermionAsset` per mesh. The meshes are disposed in a `finally` block
+  once every geometry upload has completed.
+- This is the Assimp path only. Thermion's gltfio path (`loadGltf`) and its
+  cgltf parser (`parseGltf`) stay in thermion_dart.
+- With `addToScene: false`, assets are created through
+  `viewer.app.createGeometry`: thermion's develop branch has no `addToScene`
+  parameter on the viewer-level `createGeometry`, so such assets are not
+  registered with the viewer — destroy them with `destroyAsset` rather than
+  relying on `destroyAssets`.
+
+`thermion_dart` is pinned to a specific commit of the thermion repository
+(see `pubspec.yaml`); when thermion's API moves, bump the ref deliberately.
+When this package is the root (`dart test` / `dart run` here),
+`hooks.user_defines.thermion_dart.skip_native_build: true` keeps the
+headless tests free of any Filament native build; a downstream app is the
+root and controls that define itself.
 
 ## Build
 
@@ -80,12 +121,12 @@ libc++-18 from apt.llvm.org, matching the artifact builder.
 
 - `AssimpImporter` / `AssimpExporter` / `RawMesh` /
   `ModelFileImporter` / `ModelFileExporter` are ported as-is.
+- `RawMesh.toGeometry` (conversion to thermion's render-side `Geometry`
+  type) is available as an extension in `package:assimp_dart/thermion.dart`;
+  `RawMesh.flipUVs` stays on the core type for upload-time flips.
 - `CgltfImporter` (glTF via cgltf) is **not** ported: it parses through the
   cgltf code compiled into thermion's Filament build, which this package
   does not link.
-- `RawMesh.toGeometry` (conversion to thermion's render-side `Geometry`
-  type) is not ported; `RawMesh.flipUVs` is kept so consumers can apply the
-  same vertical UV flip at upload time.
 
 ## Tests
 
@@ -97,6 +138,11 @@ Pure parse/export tests — no Filament, no GPU, no xvfb. Includes the FBX
 round-trip test (export → re-import preserves mesh data and names) and the
 garbage-bytes regression test (malformed input for fbx/obj/stl/ply must
 throw, not crash the process).
+
+The thermion integration has no test in this repository: it needs a live
+Filament viewer/engine. CI still type-checks it (`dart analyze`) against the
+pinned thermion commit; runtime coverage comes from thermion's own examples
+and tests once thermion delegates here.
 
 `tool/stress_concurrent_import.dart` hammers the importer/exporter from
 several isolates concurrently — the reproduction for a heap-corruption race

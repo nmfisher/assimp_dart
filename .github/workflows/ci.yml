@@ -85,6 +85,14 @@ jobs:
       - name: Install dependencies
         run: dart pub get
 
+      - name: Analyze
+        # Type-checks the thermion integration (lib/thermion.dart and the
+        # extensions under lib/src/thermion/) against the pinned thermion_dart
+        # git dependency, on every platform — the integration has no runtime
+        # test here (it needs a live Filament viewer; thermion's own tests
+        # cover it once they delegate to this package).
+        run: dart analyze
+
       - name: Run tests
         # Default concurrency: the two test files run as parallel isolates in
         # one process, which concurrently dlopen and enter libassimp_dart —
