@@ -1,0 +1,13 @@
+.dart_tool
+.idea
+.vscode
+.DS_Store
+build/
+pubspec.lock
+*.iml
+
+# Extracted R2 artifacts (libassimp + headers), fetched by hook/build.dart
+.dart_tool/assimp_dart/
+
+# Test output
+test/output/
