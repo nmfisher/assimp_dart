@@ -45,10 +45,11 @@ copies — they stay valid after the importer is destroyed, until `dispose`.
 `dart pub get` / `dart test` / `dart run` trigger the build hook
 (`hook/build.dart`), which:
 
-1. downloads the prebuilt Filament artifact zip for the target platform from
+1. downloads the prebuilt libassimp artifact zip for the target platform from
    Cloudflare R2 (`https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev`,
-   pinned by `filament.version`) and extracts from it only `libassimp.a`
-   (`assimp.lib` on Windows), `z.lib` (Windows) and the assimp headers under
+   keyed by `filament.version`; built and published by this repository's
+   "Build libassimp" workflow) and extracts from it `libassimp.a`
+   (`assimp.lib` + `z.lib` on Windows) and the assimp headers under
    `include/third_party/libassimp/include/`;
 2. compiles `native/src/c_api/` (model import + export + the shared
    `TMeshData` transfer struct) and links everything into a single

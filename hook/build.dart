@@ -8,7 +8,8 @@ import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
 
 // Build hook for assimp_dart: downloads the prebuilt libassimp archive (and
-// the matching assimp headers) from the Thermion Cloudflare R2 artifacts,
+// the matching assimp headers) from this repository's Cloudflare R2 artifacts
+// (published by .github/workflows/build-libassimp.yml),
 // then compiles native/src/c_api and links everything into a single
 // libassimp_dart shared library. Ported from thermion_dart/hook/build.dart
 // (branch feat/assimp-integration); everything not needed for model
@@ -224,7 +225,7 @@ Future<void> _assertSingleCppAbi(String archivePath, Logger logger) async {
   final archive = File(archivePath);
   if (!archive.existsSync()) {
     throw Exception(
-      'libassimp.a not found at $archivePath — the Filament artifact zip is '
+      'libassimp.a not found at $archivePath — the libassimp artifact zip is '
       'incomplete. Delete the enclosing directory and rebuild to re-download.',
     );
   }
@@ -248,8 +249,8 @@ Future<void> _assertSingleCppAbi(String archivePath, Logger logger) async {
           '(_ZNSt7__cxx11...): this Filament artifact was built WITHOUT '
           '-stdlib=libc++, so it cannot be linked into libassimp_dart.so '
           'together with the libc++-compiled sources of this package. '
-          "Republish the artifact from thermion's 'Build Filament' workflow "
-          '(platform for this target, upload_to_r2=true), then delete '
+          "Republish the artifact from this repository's 'Build libassimp' "
+          'workflow (platform for this target, upload_to_r2=true), then delete '
           '$archivePath (and the enclosing extraction directory) so the next '
           'build re-downloads it.',
         );
@@ -276,23 +277,21 @@ String _getFilamentVersion(Uri packageRoot) {
 }
 
 String _getArtifactUrl(String version, String platform, String mode) {
-  return 'https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev/filament-$version-$platform-$mode.zip';
+  return 'https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev/libassimp-$version-$platform-$mode.zip';
 }
 
 //
-// Download the prebuilt Filament artifact zip for the target platform from
-// Cloudflare R2 and extract ONLY what this package needs from it:
+// Download the prebuilt libassimp artifact zip for the target platform from
+// Cloudflare R2 and extract what this package needs from it:
 //
-//   - libassimp.a        (assimp.lib on Windows)
-//   - z.lib              (Windows only; FBX's binary tokenizer needs inflate
-//                          and Windows has no system zlib)
+//   - libassimp.a        (assimp.lib + z.lib on Windows)
 //   - include/third_party/libassimp/include/**  (the assimp headers)
 //
-// The full zips also carry the Filament libraries/headers this package does
-// not use (the Windows one is ~106 MB), so a selective extraction keeps the
-// cache small. Same caching scheme as thermion's hook: a `success` token next
-// to the zip marks a completed download+extraction and short-circuits
-// subsequent builds.
+// The zips are assimp-only (built by this repository's "Build libassimp"
+// workflow) with the inner layout the Filament artifact zips used to carry,
+// so the extraction filter below works unchanged. Same caching scheme as
+// thermion's hook: a `success` token next to the zip marks a completed
+// download+extraction and short-circuits subsequent builds.
 //
 Future<({Directory libDir, Directory assimpIncludeDir})> getAssimpDir(
   Uri packageRoot,

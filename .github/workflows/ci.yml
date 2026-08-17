@@ -1,8 +1,8 @@
 name: CI
 
 # Model import/export tests for assimp_dart: builds libassimp_dart (the
-# build hook downloads the prebuilt libassimp + assimp headers from the
-# Thermion R2 artifacts) and runs the OBJ/FBX/STL/PLY import and FBX export
+# build hook downloads the prebuilt libassimp + assimp headers from this
+# repository's R2 artifacts) and runs the OBJ/FBX/STL/PLY import and FBX export
 # tests, including the FBX round-trip and the garbage-bytes regression test.
 #
 # These are pure parse/export tests: no Filament, no rendering surface, no
@@ -63,7 +63,7 @@ jobs:
 
       - name: Install artifact-matched clang/libc++ 18 (Linux)
         # clang-18 + libc++ 18 from apt.llvm.org — the same toolchain that
-        # builds the R2 artifacts (see thermion's build-filament workflow).
+        # builds the R2 artifacts (see the Build libassimp workflow).
         # jammy's distro libc++-dev/libc++abi-dev are LLVM 14 and must NOT be
         # installed: they would shadow the 18 runtime in the same directory.
         # libunwind-18 provides the libunwind.so.1 that libassimp_dart.so
