@@ -2,7 +2,7 @@ name: CI
 
 # Model import/export tests for assimp_dart: builds libassimp_dart (the
 # build hook downloads the prebuilt libassimp + assimp headers from this
-# repository's R2 artifacts) and runs the OBJ/FBX/STL/PLY import and FBX export
+# repository's release artifacts) and runs the OBJ/FBX/STL/PLY import and FBX export
 # tests, including the FBX round-trip and the garbage-bytes regression test.
 #
 # These are pure parse/export tests: no Filament, no rendering surface, no
@@ -10,7 +10,7 @@ name: CI
 # this workflow is adapted from.
 #
 # The Linux toolchain is deliberately clang-18 + libc++ 18 from apt.llvm.org,
-# identical to what builds the R2 artifacts. The tests link a libc++-built
+# identical to what builds the release artifacts. The tests link a libc++-built
 # libassimp.a and the built libassimp_dart.so resolves libc++.so.1 at
 # runtime: running against a mismatched libc++abi (an older runtime injected
 # through LD_LIBRARY_PATH) crashed inside libc++abi's exception/RTTI
@@ -52,10 +52,10 @@ jobs:
           restore-keys: |
             pub-${{ runner.os }}-
 
-      - name: Cache R2 artifacts
+      - name: Cache prebuilt artifacts
         # The hook's download is content-addressed by filament.version +
-        # platform + mode; cache it so CI does not re-download ~20-106 MB
-        # per run.
+        # platform + mode; cache it so CI does not re-download the zip
+        # (~1-8 MB release, ~20-30 MB debug) per run.
         uses: actions/cache@v4
         with:
           path: .dart_tool/assimp_dart/lib
@@ -63,7 +63,7 @@ jobs:
 
       - name: Install artifact-matched clang/libc++ 18 (Linux)
         # clang-18 + libc++ 18 from apt.llvm.org — the same toolchain that
-        # builds the R2 artifacts (see the Build libassimp workflow).
+        # builds the release artifacts (see the Build libassimp workflow).
         # jammy's distro libc++-dev/libc++abi-dev are LLVM 14 and must NOT be
         # installed: they would shadow the 18 runtime in the same directory.
         # libunwind-18 provides the libunwind.so.1 that libassimp_dart.so

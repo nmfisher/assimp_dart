@@ -1,20 +1,25 @@
 name: Build libassimp
 
 # Builds the prebuilt libassimp artifacts this package's build hook consumes
-# (hook/build.dart downloads them from R2 at a URL keyed by filament.version).
+# (hook/build.dart downloads them from GitHub Releases at a URL keyed by
+# filament.version).
 #
 # For each platform it checks out Filament at the tag in filament.version,
 # patches the third_party/libassimp/tnt overlay (scripts/patch_libassimp_tnt.py:
 # enables STL/PLY import + FBX export), builds libz + libassimp for BOTH
-# release and debug, and stages assimp-only zips:
+# release and debug, and stages assimp-only zips published to the release
+# tagged libassimp-<filament-version>:
 #
 #   libassimp-<filament-version>-<platform>-<release|debug>.zip
 #     ├── libassimp.a            (assimp.lib + z.lib on Windows)
 #     └── include/third_party/libassimp/include/assimp/**   (the headers)
 #
-# The inner layout intentionally matches the libassimp subset of the old
-# Filament artifact zips (which carried libassimp alongside the Filament
-# libraries), so the hook's extraction filter works unchanged.
+# The assets are tiny (release ~1-8 MB, debug ~20-90 MB compressed), far
+# under GitHub's 2 GB per-file limit, and publishing needs only the workflow's
+# built-in GITHUB_TOKEN — no Cloudflare credentials. The inner layout
+# intentionally matches the libassimp subset of the old Filament artifact zips
+# (which carried libassimp alongside the Filament libraries on R2), so the
+# hook's extraction filter works unchanged.
 #
 # Ported from thermion's .github/workflows/build-libassimp.yml +
 # scripts/build_libassimp.sh (branch feat/assimp-integration, PR #195): now
@@ -36,8 +41,8 @@ on:
         description: 'Filament tag (overrides filament.version)'
         required: false
         type: string
-      upload_to_r2:
-        description: 'Upload artifacts to R2'
+      publish:
+        description: 'Publish zips to the GitHub release'
         required: false
         type: boolean
         default: false
@@ -45,11 +50,6 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  R2_BUCKET_NAME: thermion
-  R2_ENDPOINT: https://260d4efc65af500536ea376de6452ece.r2.cloudflarestorage.com
-  R2_PUBLIC_URL: https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev
 
 jobs:
   setup:
@@ -97,6 +97,9 @@ jobs:
           - platform: web
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
+    permissions:
+      # gh release create/upload under GITHUB_TOKEN.
+      contents: write
     env:
       FILAMENT_VERSION: ${{ needs.setup.outputs.version }}
       FILAMENT_REPO: ${{ needs.setup.outputs.repo }}
@@ -414,18 +417,21 @@ jobs:
           path: libassimp-*.zip
           retention-days: 7
 
-      - name: Upload to R2
-        if: inputs.upload_to_r2
+      - name: Publish to GitHub Releases
+        if: inputs.publish
         shell: bash
-        run: |
-          for variant in release debug; do
-            aws s3 cp \
-              "libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
-            echo "Uploaded: ${{ env.R2_PUBLIC_URL }}/libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip"
-          done
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="libassimp-$FILAMENT_VERSION"
+          # Matrix jobs run concurrently; whoever gets there first creates
+          # the release, the others see it already exists.
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" \
+              --title "libassimp $FILAMENT_VERSION" \
+              --notes "Prebuilt libassimp built against Filament $FILAMENT_VERSION by the Build libassimp workflow." \
+            || true
+          for variant in release debug; do
+            gh release upload "$tag" "libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip" --clobber
+            echo "Published: https://github.com/${{ github.repository }}/releases/download/$tag/libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip"
+          done
