@@ -392,10 +392,13 @@ jobs:
           ls -la libassimp-*.zip
 
       # Windows: the MSVC generator puts outputs under config-named dirs
-      # (out/assimp/Release/assimp.lib). z.lib comes from the libz build
-      # (target name varies across zlib revisions — take the first .lib the
-      # config dir contains). Compress-Archive writes backslash-separated
-      # entry names; the hook normalises those when extracting.
+      # (out/assimp/Release/assimp.lib). z.lib must be the STATIC zlib
+      # archive: zlib's CMakeLists unconditionally builds a shared
+      # zlib1.dll whose import library (zlib.lib) sorts first — picking
+      # that would give assimp_dart.dll a runtime dependency on a
+      # zlib1.dll that is never shipped (LoadLibrary error 126).
+      # Compress-Archive writes backslash-separated entry names; the hook
+      # normalises those when extracting.
       - name: Stage zips (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -407,10 +410,9 @@ jobs:
             New-Item -ItemType Directory -Force -Path "$stage/include/third_party/libassimp/include" | Out-Null
             Copy-Item -Recurse "filament/third_party/libassimp/include/assimp" "$stage/include/third_party/libassimp/include/"
             Copy-Item "filament/out/assimp/$config/assimp.lib" "$stage/"
-            $zlib = Get-ChildItem "filament/out/libz/$config" -Filter '*.lib' |
-              Select-Object -First 1
-            if ($null -eq $zlib) { throw "no .lib found under filament/out/libz/$config" }
-            Copy-Item $zlib.FullName "$stage/z.lib"
+            $zstatic = "filament/out/libz/$config/zlibstatic.lib"
+            if (-not (Test-Path $zstatic)) { throw "static zlib not found: $zstatic" }
+            Copy-Item $zstatic "$stage/z.lib"
             Compress-Archive -Path "$stage/*" `
               -DestinationPath "libassimp-$env:FILAMENT_VERSION-$env:PLATFORM-$variant.zip"
           }
