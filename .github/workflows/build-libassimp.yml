@@ -410,7 +410,9 @@ jobs:
             New-Item -ItemType Directory -Force -Path "$stage/include/third_party/libassimp/include" | Out-Null
             Copy-Item -Recurse "filament/third_party/libassimp/include/assimp" "$stage/include/third_party/libassimp/include/"
             Copy-Item "filament/out/assimp/$config/assimp.lib" "$stage/"
-            $zstatic = "filament/out/libz/$config/zlibstatic.lib"
+            # zlib's CMakeLists sets CMAKE_DEBUG_POSTFIX "d" under MSVC
+            $zname = if ($variant -eq 'debug') { 'zlibstaticd.lib' } else { 'zlibstatic.lib' }
+            $zstatic = "filament/out/libz/$config/$zname"
             if (-not (Test-Path $zstatic)) { throw "static zlib not found: $zstatic" }
             Copy-Item $zstatic "$stage/z.lib"
             Compress-Archive -Path "$stage/*" `
