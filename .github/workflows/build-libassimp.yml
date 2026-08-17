@@ -159,7 +159,13 @@ jobs:
       # cmake. libz is built too: assimp_dart links the bundled z.lib on
       # Windows (see native/include/c_api/APIExport.h) because Windows has no
       # system zlib. The MSVC generator is multi-config, so Release and Debug
-      # come out of one configure. ----
+      # come out of one configure.
+      #
+      # assimp's include flags point at BOTH the libz source tree (zlib.h)
+      # and the libz build dir (zconf.h): zlib's CMakeLists renames the
+      # checked-in third_party/libz/zconf.h to zconf.h.included on any
+      # out-of-source configure and generates a fresh zconf.h only in the
+      # build directory. ----
       - name: Build libz + libassimp (Windows)
         if: matrix.platform == 'windows'
         shell: cmd
@@ -176,8 +182,8 @@ jobs:
           cd out\assimp
           cmake -G "Visual Studio 17 2022" -T v142 ^
             -DCMAKE_CXX_STANDARD=17 ^
-            -DCMAKE_C_FLAGS=/I..\..\third_party\libz ^
-            -DCMAKE_CXX_FLAGS=/I..\..\third_party\libz ^
+            -DCMAKE_C_FLAGS="/I..\..\third_party\libz /I..\libz" ^
+            -DCMAKE_CXX_FLAGS="/I..\..\third_party\libz /I..\libz" ^
             -DASSIMP_BUILD_ASSIMP_TOOLS=OFF ^
             -DASSIMP_BUILD_TESTS=OFF ^
             -DASSIMP_BUILD_SAMPLES=OFF ^
