@@ -147,7 +147,9 @@ void main(List<String> args) async {
       // Static archives are implementation details of libassimp_dart.so; the
       // FBX binary tokenizer needs zlib's inflate, so link the system zlib
       // (Windows links the z.lib bundled in the artifact instead, via the
-      // #pragma comment(lib) directives in APIExport.h).
+      // #pragma comment(lib) directives in APIExport.h). macOS needs it too:
+      // -force_load pulls in unzip.c.o, which references crc32/inflate —
+      // without -lz the dylib link fails with undefined arm64 symbols.
       //
       // The linker resolves left-to-right and CBuilder places `flags` BEFORE
       // the sources, so a plain -lassimp sees no pending references and pulls
@@ -165,7 +167,7 @@ void main(List<String> args) async {
           '-force_load',
           path.join(libDir, 'libassimp.a'),
         ],
-        if (targetOS != OS.macOS) '-lz',
+        '-lz',
         '-lc++',
         '-L$libDir',
       ]);
