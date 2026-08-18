@@ -1,0 +1,447 @@
+name: Build libassimp
+
+# Builds the prebuilt libassimp artifacts this package's build hook consumes
+# (hook/build.dart downloads them from GitHub Releases at a URL keyed by
+# filament.version).
+#
+# For each platform it checks out Filament at the tag in filament.version,
+# patches the third_party/libassimp/tnt overlay (scripts/patch_libassimp_tnt.py:
+# enables STL/PLY import + FBX export), builds libz + libassimp for BOTH
+# release and debug, and stages assimp-only zips published to the release
+# tagged libassimp-<filament-version>:
+#
+#   libassimp-<filament-version>-<platform>-<release|debug>.zip
+#     ├── libassimp.a            (assimp.lib + z.lib on Windows)
+#     └── include/third_party/libassimp/include/assimp/**   (the headers)
+#
+# The assets are tiny (release ~1-8 MB, debug ~20-90 MB compressed), far
+# under GitHub's 2 GB per-file limit, and publishing needs only the workflow's
+# built-in GITHUB_TOKEN — no Cloudflare credentials. The inner layout
+# intentionally matches the libassimp subset of the old Filament artifact zips
+# (which carried libassimp alongside the Filament libraries on R2), so the
+# hook's extraction filter works unchanged.
+#
+# Ported from thermion's .github/workflows/build-libassimp.yml +
+# scripts/build_libassimp.sh (branch feat/assimp-integration, PR #195): now
+# that assimp support lives in this package, artifact production lives here
+# too and thermion's Filament zips no longer carry libassimp.
+#
+# glibc/ABI notes carried over from thermion's "Build Filament" workflow:
+#   - Linux builds on ubuntu-22.04 (glibc 2.35) with clang-18 + libc++ 18.
+#     A libassimp built against newer glibc headers references
+#     __isoc23_*@GLIBC_2.38 and fails to dlopen on older distros; one built
+#     with libstdc++ (gcc silently ignores -stdlib=libc++) leaves
+#     _ZNSt7__cxx11-mangled refs undefined and crashes inside libc++abi at
+#     runtime. Both are rejected by guard steps before upload.
+
+on:
+  workflow_dispatch:
+    inputs:
+      filament_version:
+        description: 'Filament tag (overrides filament.version)'
+        required: false
+        type: string
+      publish:
+        description: 'Publish zips to the GitHub release'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      repo: ${{ steps.read.outputs.repo }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read Filament version
+        id: read
+        run: |
+          read -r REPO VERSION < filament.version
+          [ -n "${{ inputs.filament_version }}" ] && VERSION="${{ inputs.filament_version }}"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building libassimp against Filament repo=$REPO ref=$VERSION"
+
+  build:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2022
+          # ubuntu-22.04 for the glibc 2.35 baseline (see the header comment):
+          # ubuntu-24.04 headers emit __isoc23_*@GLIBC_2.38 references that
+          # dlopen cannot resolve on older distros.
+          - platform: linux
+            runner: ubuntu-22.04
+          # GitHub-hosted arm64 runner, same glibc 2.35 baseline as linux.
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+          # Universal (arm64 + x86_64), like thermion's macOS build.
+          - platform: macos
+            runner: macos-14
+          # Device arm64 only; simulator slices can be added alongside (see
+          # thermion's build_ios.sh) when the hook grows iOS support.
+          - platform: ios
+            runner: macos-14
+          # All four ABIs thermion's android artifacts ship, one subdir each.
+          - platform: android
+            runner: ubuntu-24.04
+          - platform: web
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      # gh release create/upload under GITHUB_TOKEN.
+      contents: write
+    env:
+      FILAMENT_VERSION: ${{ needs.setup.outputs.version }}
+      FILAMENT_REPO: ${{ needs.setup.outputs.repo }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Checkout assimp_dart
+        uses: actions/checkout@v4
+
+      - name: Checkout Filament
+        shell: bash
+        run: git clone --depth 1 --branch "$FILAMENT_VERSION" "$FILAMENT_REPO" filament
+
+      - name: Patch libassimp tnt overlay
+        shell: bash
+        run: python3 scripts/patch_libassimp_tnt.py "$GITHUB_WORKSPACE/filament"
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.0'
+
+      - name: Install Ninja
+        if: matrix.platform != 'windows'
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      # clang-18 + libc++ 18 for the Linux libassimp build (see the header
+      # comment). ubuntu-22.04 and ubuntu-22.04-arm both need it: jammy's
+      # distro clang is 14.
+      - name: Install clang + libc++ (Linux)
+        if: matrix.platform == 'linux' || matrix.platform == 'linux-arm64'
+        run: |
+          sudo apt-get update
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          # apt.llvm.org only installs versioned binaries, so point the
+          # unversioned names at clang-18.
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 200
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 200
+          clang --version
+
+      - name: Setup Android NDK
+        if: matrix.platform == 'android'
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Setup Emscripten
+        if: matrix.platform == 'web'
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: '6.0.4'
+
+      # ---- Windows: MSVC, mirrors thermion's build_windows.bat libassimp
+      # cmake. libz is built too: assimp_dart links the bundled z.lib on
+      # Windows (see native/include/c_api/APIExport.h) because Windows has no
+      # system zlib. The MSVC generator is multi-config, so Release and Debug
+      # come out of one configure.
+      #
+      # assimp's include flags point at BOTH the libz source tree (zlib.h)
+      # and the libz build dir (zconf.h): zlib's CMakeLists renames the
+      # checked-in third_party/libz/zconf.h to zconf.h.included on any
+      # out-of-source configure and generates a fresh zconf.h only in the
+      # build directory. ----
+      - name: Build libz + libassimp (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          mkdir filament\out\libz
+          cd filament\out\libz
+          cmake -G "Visual Studio 17 2022" -T v142 ^
+            ..\..\third_party\libz
+          cmake --build . --config Release
+          cmake --build . --config Debug
+
+          cd ..\..
+          mkdir out\assimp
+          cd out\assimp
+          cmake -G "Visual Studio 17 2022" -T v142 ^
+            -DCMAKE_CXX_STANDARD=17 ^
+            -DCMAKE_C_FLAGS="/I..\..\third_party\libz /I..\libz" ^
+            -DCMAKE_CXX_FLAGS="/I..\..\third_party\libz /I..\libz" ^
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF ^
+            -DASSIMP_BUILD_TESTS=OFF ^
+            -DASSIMP_BUILD_SAMPLES=OFF ^
+            -DASSIMP_WARNINGS_AS_ERRORS=OFF ^
+            ..\..\third_party\libassimp\tnt
+          cmake --build . --config Release
+          cmake --build . --config Debug
+
+      # ---- Linux: Ninja + clang/libc++ (single-ABI rule, header comment).
+      # The arm64 job runs on the arm64 runner, so no cross-toolchain is
+      # needed. Variant pairs are "<key> <cmake config>" (portable across the
+      # GNU and BSD userlands the runners ship). ----
+      - name: Build libassimp (Linux)
+        if: matrix.platform == 'linux' || matrix.platform == 'linux-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CC=clang CXX=clang++
+          for pair in "release Release" "debug Debug"; do
+            read -r variant config <<< "$pair"
+            mkdir -p "filament/out/assimp-$variant"
+            cd "filament/out/assimp-$variant"
+            cmake -G Ninja -DCMAKE_BUILD_TYPE="$config" \
+              -DCMAKE_CXX_STANDARD=17 \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+              -DCMAKE_C_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+              -DCMAKE_CXX_FLAGS="-stdlib=libc++ -I$GITHUB_WORKSPACE/filament/third_party/libz" \
+              -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+              -DASSIMP_BUILD_TESTS=OFF \
+              -DASSIMP_BUILD_SAMPLES=OFF \
+              -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+              "$GITHUB_WORKSPACE/filament/third_party/libassimp/tnt"
+            cmake --build .
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      # ---- macOS: Ninja, universal arm64 + x86_64 (macOS clang defaults to
+      # libc++, so no -stdlib flag). ----
+      - name: Build libassimp (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in "release Release" "debug Debug"; do
+            read -r variant config <<< "$pair"
+            mkdir -p "filament/out/assimp-$variant"
+            cd "filament/out/assimp-$variant"
+            cmake -G Ninja -DCMAKE_BUILD_TYPE="$config" \
+              -DCMAKE_CXX_STANDARD=17 \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+              -DCMAKE_C_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+              -DCMAKE_CXX_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+              -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+              -DASSIMP_BUILD_TESTS=OFF \
+              -DASSIMP_BUILD_SAMPLES=OFF \
+              -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+              "$GITHUB_WORKSPACE/filament/third_party/libassimp/tnt"
+            cmake --build .
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      # ---- iOS: Ninja + iphoneos sysroot, device arm64 (mirrors thermion's
+      # build_ios.sh libassimp cmake). ----
+      - name: Build libassimp (iOS)
+        if: matrix.platform == 'ios'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in "release Release" "debug Debug"; do
+            read -r variant config <<< "$pair"
+            mkdir -p "filament/out/assimp-ios-$variant"
+            cd "filament/out/assimp-ios-$variant"
+            cmake -G Ninja -DCMAKE_BUILD_TYPE="$config" \
+              -DCMAKE_CXX_STANDARD=17 \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_SYSROOT=iphoneos \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DIOS=1 \
+              -DCMAKE_C_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+              -DCMAKE_CXX_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+              -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+              -DASSIMP_BUILD_TESTS=OFF \
+              -DASSIMP_BUILD_SAMPLES=OFF \
+              -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+              "$GITHUB_WORKSPACE/filament/third_party/libassimp/tnt"
+            cmake --build .
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      # ---- Android: Ninja + NDK toolchain, all four ABIs (mirrors
+      # thermion's build_android.sh). ----
+      - name: Build libassimp (Android)
+        if: matrix.platform == 'android'
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          for pair in "release Release" "debug Debug"; do
+            read -r variant config <<< "$pair"
+            for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+              mkdir -p "filament/out/assimp-android-$variant-$abi"
+              cd "filament/out/assimp-android-$variant-$abi"
+              cmake -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+                -DANDROID_ABI="$abi" \
+                -DANDROID_PLATFORM=android-21 \
+                -DCMAKE_BUILD_TYPE="$config" \
+                -DCMAKE_CXX_STANDARD=17 \
+                -DCMAKE_C_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+                -DCMAKE_CXX_FLAGS="-I$GITHUB_WORKSPACE/filament/third_party/libz" \
+                -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+                -DASSIMP_BUILD_TESTS=OFF \
+                -DASSIMP_BUILD_SAMPLES=OFF \
+                -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+                "$GITHUB_WORKSPACE/filament/third_party/libassimp/tnt"
+              cmake --build .
+              cd "$GITHUB_WORKSPACE"
+            done
+          done
+
+      # ---- Web: Ninja + Emscripten (mirrors thermion's build_web.sh
+      # libassimp cmake, incl. the pthread/atomics flags). ----
+      - name: Build libassimp (Web)
+        if: matrix.platform == 'web'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in "release Release" "debug Debug"; do
+            read -r variant config <<< "$pair"
+            mkdir -p "filament/out/assimp-web-$variant"
+            cd "filament/out/assimp-web-$variant"
+            cmake -G Ninja -DCMAKE_BUILD_TYPE="$config" \
+              -DCMAKE_CXX_STANDARD=20 \
+              -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
+              -DCMAKE_C_FLAGS="-pthread -I$GITHUB_WORKSPACE/filament/third_party/libz -matomics -mbulk-memory" \
+              -DCMAKE_CXX_FLAGS="-pthread -I$GITHUB_WORKSPACE/filament/third_party/libz -matomics -mbulk-memory" \
+              -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+              -DASSIMP_BUILD_TESTS=OFF \
+              -DASSIMP_BUILD_SAMPLES=OFF \
+              -DASSIMP_WARNINGS_AS_ERRORS=OFF \
+              "$GITHUB_WORKSPACE/filament/third_party/libassimp/tnt"
+            cmake --build .
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      # Guards carried over from thermion's "Build Filament" linux job, now
+      # applied to the libassimp archives this workflow produces.
+      - name: Reject bad glibc / C++ ABI references (Linux)
+        if: matrix.platform == 'linux' || matrix.platform == 'linux-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for a in filament/out/assimp-*/libassimp.a; do
+            # glibc baseline: __isoc23_* (plain, unversioned "U" refs) come
+            # from glibc >= 2.38 headers and fail to dlopen on glibc 2.35.
+            refs=$(nm -A "$a" 2>/dev/null | grep -E ' U (__isoc23_|.*@GLIBC_2\.(3[6-9]|[4-9][0-9]))' || true)
+            if [ -n "$refs" ]; then
+              echo "$a references glibc symbols newer than GLIBC_2.35:"
+              echo "$refs" | head -20
+              exit 1
+            fi
+            # Single C++ ABI: a libstdc++-built archive leaves
+            # _ZNSt7__cxx11-mangled refs that crash libc++abi at runtime.
+            cpprefs=$(nm -A "$a" 2>/dev/null | grep ' U _ZNSt7__cxx11' || true)
+            if [ -n "$cpprefs" ]; then
+              echo "$a references the libstdc++ ABI (_ZNSt7__cxx11); it must be built with -stdlib=libc++:"
+              echo "$cpprefs" | head -20
+              exit 1
+            fi
+            echo "OK: $a"
+          done
+
+      - name: Stage zips (non-Windows)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in release debug; do
+            stage="stage-$variant"
+            mkdir -p "$stage/include/third_party/libassimp/include"
+            cp -R filament/third_party/libassimp/include/assimp \
+              "$stage/include/third_party/libassimp/include/"
+
+            case "$PLATFORM" in
+              linux|linux-arm64|macos)
+                cp "filament/out/assimp-$variant/libassimp.a" "$stage/"
+                ;;
+              ios)
+                cp "filament/out/assimp-ios-$variant/libassimp.a" "$stage/"
+                ;;
+              android)
+                for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+                  mkdir -p "$stage/$abi"
+                  cp "filament/out/assimp-android-$variant-$abi/libassimp.a" "$stage/$abi/"
+                done
+                ;;
+              web)
+                cp "filament/out/assimp-web-$variant/libassimp.a" "$stage/"
+                ;;
+            esac
+
+            (cd "$stage" && zip -qr "../libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip" .)
+          done
+          ls -la libassimp-*.zip
+
+      # Windows: the MSVC generator puts outputs under config-named dirs
+      # (out/assimp/Release/assimp.lib). z.lib must be the STATIC zlib
+      # archive: zlib's CMakeLists unconditionally builds a shared
+      # zlib1.dll whose import library (zlib.lib) sorts first — picking
+      # that would give assimp_dart.dll a runtime dependency on a
+      # zlib1.dll that is never shipped (LoadLibrary error 126).
+      # Compress-Archive writes backslash-separated entry names; the hook
+      # normalises those when extracting.
+      - name: Stage zips (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($variant in @('release', 'debug')) {
+            $config = $variant.Substring(0,1).ToUpper() + $variant.Substring(1)
+            $stage = "stage-$variant"
+            New-Item -ItemType Directory -Force -Path "$stage/include/third_party/libassimp/include" | Out-Null
+            Copy-Item -Recurse "filament/third_party/libassimp/include/assimp" "$stage/include/third_party/libassimp/include/"
+            Copy-Item "filament/out/assimp/$config/assimp.lib" "$stage/"
+            # zlib's CMakeLists sets CMAKE_DEBUG_POSTFIX "d" under MSVC
+            $zname = if ($variant -eq 'debug') { 'zlibstaticd.lib' } else { 'zlibstatic.lib' }
+            $zstatic = "filament/out/libz/$config/$zname"
+            if (-not (Test-Path $zstatic)) { throw "static zlib not found: $zstatic" }
+            Copy-Item $zstatic "$stage/z.lib"
+            Compress-Archive -Path "$stage/*" `
+              -DestinationPath "libassimp-$env:FILAMENT_VERSION-$env:PLATFORM-$variant.zip"
+          }
+          Get-ChildItem 'libassimp-*.zip'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libassimp-${{ matrix.platform }}
+          path: libassimp-*.zip
+          retention-days: 7
+
+      - name: Publish to GitHub Releases
+        if: inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="libassimp-$FILAMENT_VERSION"
+          # Matrix jobs run concurrently; whoever gets there first creates
+          # the release, the others see it already exists.
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" \
+              --title "libassimp $FILAMENT_VERSION" \
+              --notes "Prebuilt libassimp built against Filament $FILAMENT_VERSION by the Build libassimp workflow." \
+            || true
+          for variant in release debug; do
+            gh release upload "$tag" "libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip" --clobber
+            echo "Published: https://github.com/${{ github.repository }}/releases/download/$tag/libassimp-$FILAMENT_VERSION-$PLATFORM-$variant.zip"
+          done
